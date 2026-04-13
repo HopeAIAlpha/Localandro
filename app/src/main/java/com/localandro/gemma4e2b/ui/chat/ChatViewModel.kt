@@ -88,25 +88,21 @@ class ChatViewModel(
         }
 
         viewModelScope.launch(Dispatchers.IO) {
-            val streamBuffer = StringBuilder()
-
             orchestrator.processUserMessage(
                 userText = trimmed,
-                onToken = { token ->
-                    streamBuffer.append(token)
+                onToken = { visibleText ->
+                    // The orchestrator already filters tool-call tokens;
+                    // visibleText is the clean, user-facing output so far.
                     _uiState.update {
-                        it.copy(streamBuffer = streamBuffer.toString())
+                        it.copy(streamBuffer = visibleText)
                     }
                 },
                 onToolCall = { toolName ->
                     _uiState.update {
                         it.copy(
-                            streamBuffer = streamBuffer.toString() +
-                                    "\n🔧 Ejecutando: $toolName…"
+                            streamBuffer = "🔧 Ejecutando: $toolName…"
                         )
                     }
-                    // Reset stream buffer for next iteration.
-                    streamBuffer.clear()
                 },
                 onComplete = { modelMessage ->
                     _uiState.update {

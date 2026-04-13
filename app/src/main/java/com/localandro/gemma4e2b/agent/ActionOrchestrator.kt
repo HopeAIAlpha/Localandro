@@ -126,7 +126,10 @@ class ActionOrchestrator(
                     .onCompletion { /* handled below */ }
                     .collect { token ->
                         fullResponse.append(token)
-                        onToken(token)
+                        // Only emit user-visible text to the UI — never leak
+                        // tool-call delimiters or JSON payloads.
+                        val visibleText = ToolCallParser.getVisibleText(fullResponse.toString())
+                        onToken(visibleText)
                     }
 
                 if (_agentState.value.phase == AgentPhase.ERROR) return
@@ -143,9 +146,7 @@ class ActionOrchestrator(
                     Log.d(TAG, "Tool call detected: ${parsedCall.name}")
 
                     // Add the model's planning message (text before tool call).
-                    val planText = ToolCallParser.stripToolTokens(
-                        responseText.substringBefore("<|tool_call|>")
-                    ).trim()
+                    val planText = ToolCallParser.getVisibleText(responseText).trim()
                     if (planText.isNotEmpty()) {
                         _agentState.update {
                             it.copy(planSummary = planText)
