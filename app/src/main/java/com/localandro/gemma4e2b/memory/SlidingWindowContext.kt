@@ -5,13 +5,17 @@ import com.localandro.gemma4e2b.domain.model.MessageRole
 
 /**
  * Sliding-window context manager that keeps the most relevant messages
- * within a fixed token budget.
+ * within a fixed token budget while maintaining **chronological order**.
  *
  * Priority order (never evicted first → evicted first):
  * 1. System prompt – always retained.
- * 2. Last tool results – always retained (needed for the current turn).
- * 3. Recent user and model messages – retained newest-first until budget.
- * 4. Older messages – evicted from the oldest end.
+ * 2. Most recent messages (all types) – retained newest-first until budget.
+ * 3. Older messages – evicted from the oldest end.
+ *
+ * All message types (USER, MODEL, TOOL_CALL, TOOL_RESULT) are kept in
+ * their natural chronological order so that the model sees a coherent
+ * conversation flow. Tool results are NOT separated to the end — they
+ * appear immediately after their corresponding tool call.
  *
  * Token estimation uses a simple character-based heuristic
  * (≈4 characters per token for English text, adjusted for multilingual).
@@ -22,8 +26,12 @@ class SlidingWindowContext(
 ) {
 
     companion object {
-        /** Default context window size matching Gemma 4 E2B's capacity. */
-        const val DEFAULT_MAX_TOKENS = 4096
+        /**
+         * Default context window budget for the prompt.
+         * Set to 3072 (not the full 4096 model context) to leave ~1024
+         * tokens for the model's generation within the E2B's 4096 limit.
+         */
+        const val DEFAULT_MAX_TOKENS = 3072
 
         /** Conservative estimate: ~4 chars/token for mixed-language content. */
         const val DEFAULT_CHARS_PER_TOKEN = 4
@@ -31,8 +39,8 @@ class SlidingWindowContext(
 
     /**
      * Builds a token-budgeted context window from the full conversation
-     * history, ensuring the system prompt and latest tool results are
-     * always included.
+     * history, ensuring the system prompt is always included and messages
+     * are in chronological order.
      *
      * @param systemPrompt The immutable system prompt (highest priority).
      * @param messages     The full conversation history.
@@ -60,31 +68,23 @@ class SlidingWindowContext(
         )
         var usedChars = systemContent.length
 
-        // 2. Separate latest tool results (always include).
-        val recentToolResults = messages.filter {
-            it.role == MessageRole.TOOL_RESULT || it.role == MessageRole.TOOL_CALL
-        }.takeLast(4) // Keep at most 4 most recent tool interactions.
+        // 2. Working backwards from newest, include as many messages as
+        //    fit while maintaining chronological order. This keeps all
+        //    message types (USER, MODEL, TOOL_CALL, TOOL_RESULT) in
+        //    their natural interleaved order.
+        val selected = mutableListOf<Message>()
 
-        recentToolResults.forEach { usedChars += it.content.length }
-
-        // 3. Fill remaining budget with conversation messages (newest first).
-        val conversationMessages = messages.filter {
-            it.role == MessageRole.USER || it.role == MessageRole.MODEL
-        }
-        val selectedConversation = mutableListOf<Message>()
-
-        for (msg in conversationMessages.reversed()) {
+        for (msg in messages.reversed()) {
             val msgChars = msg.content.length
             if (usedChars + msgChars > maxChars) break
-            selectedConversation.add(0, msg) // prepend to maintain order
+            selected.add(0, msg) // prepend to maintain chronological order
             usedChars += msgChars
         }
 
-        // 4. Assemble final context in chronological order.
+        // 3. Assemble final context.
         return buildList {
             add(systemMessage)
-            addAll(selectedConversation)
-            addAll(recentToolResults)
+            addAll(selected)
         }
     }
 

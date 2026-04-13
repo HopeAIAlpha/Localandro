@@ -137,8 +137,10 @@ object ToolCallParser {
      * @param result   The tool's output string.
      */
     fun formatToolResult(toolName: String, result: String): String {
-        val escapedResult = result.replace("\"", "\\\"")
-        return "$TOOL_RESP_OPEN\nresponse:$toolName{result:$STR_DELIM$escapedResult$STR_DELIM}\n$TOOL_RESP_CLOSE"
+        // Collapse newlines into spaces so the tool result stays on a
+        // single line, matching the Gemma 4 wire format the model expects.
+        val singleLine = result.replace("\n", " ").replace("\"", "\\\"")
+        return "${TOOL_RESP_OPEN}response:$toolName{result:${STR_DELIM}$singleLine${STR_DELIM}}${TOOL_RESP_CLOSE}"
     }
 
     /**
