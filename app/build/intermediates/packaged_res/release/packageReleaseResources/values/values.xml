@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">Localandro</string>
-    <style name="Theme.Localandro" parent="android:Theme.Material.Light.NoActionBar"/>
-</resources>
