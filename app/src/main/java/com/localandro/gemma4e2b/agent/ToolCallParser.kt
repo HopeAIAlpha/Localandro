@@ -1,75 +1,82 @@
 package com.localandro.gemma4e2b.agent
 
+import android.util.Log
 import org.json.JSONException
 import org.json.JSONObject
 
 /**
  * Parses Gemma 4 tool-call tokens emitted inside model output.
  *
- * Expected wire format (Gemma 4 function-calling protocol):
+ * **Official Gemma 4 wire format** (from Google AI docs):
+ *
+ * Tool definition (system prompt):
  * ```
- * <|tool_call|>
- * {"name": "tool_name", "arguments": {"key": "value"}}
- * <|end_tool_call|>
+ * <|tool>declaration:func_name{description:<|"|>...<|"|>,parameters:{...}}<tool|>
  * ```
  *
- * The parser is **permissive**: it also matches common model hallucinations
- * such as `<tool_call>`, `<|tool_call>`, `<tool_call|>`, and `</tool_call>`.
+ * Model emits a tool call:
+ * ```
+ * <|tool_call>call:func_name{key:<|"|>value<|"|>}<tool_call|>
+ * ```
  *
- * After tool execution the result is injected as:
+ * Application injects a tool result:
  * ```
- * <|tool_result|>
- * {"result": "..."}
- * <|end_tool_result|>
+ * <|tool_response>response:func_name{key:<|"|>value<|"|>}<tool_response|>
  * ```
+ *
+ * String values are delimited with `<|"|>` (not regular quotes).
+ *
+ * The parser is **permissive**: it also tolerates common hallucinations
+ * such as `<tool_call>`, `<|tool_call|>`, `</tool_call>`, and mixed
+ * forms, falling back to JSON extraction when the native KV format
+ * is not present.
  */
 object ToolCallParser {
 
-    // Canonical delimiters used for output formatting.
-    private const val TOOL_CALL_OPEN = "<|tool_call|>"
-    private const val TOOL_CALL_CLOSE = "<|end_tool_call|>"
-    private const val TOOL_RESULT_OPEN = "<|tool_result|>"
-    private const val TOOL_RESULT_CLOSE = "<|end_tool_result|>"
+    private const val TAG = "ToolCallParser"
+
+    // ── Canonical delimiters (Gemma 4 native) ───────────────────────
+
+    private const val TOOL_CALL_OPEN   = "<|tool_call>"
+    private const val TOOL_CALL_CLOSE  = "<tool_call|>"
+    private const val TOOL_RESP_OPEN   = "<|tool_response>"
+    private const val TOOL_RESP_CLOSE  = "<tool_response|>"
+    private const val TOOL_DEF_OPEN    = "<|tool>"
+    private const val TOOL_DEF_CLOSE   = "<tool|>"
+    /** Gemma 4 string value delimiter. */
+    private const val STR_DELIM        = "<|\"|>"
+
+    // ── Permissive regex patterns ───────────────────────────────────
+    // These catch both the official tokens AND common hallucinations.
 
     /**
-     * Permissive regex matching common hallucinated variants of the
-     * tool-call open delimiter:
-     * `<|tool_call|>`, `<tool_call>`, `<|tool_call>`, `<tool_call|>`, `< tool_call >`
+     * Matches any variant of a tool-call open token:
+     * `<|tool_call>`, `<|tool_call|>`, `<tool_call>`, `<tool_call|>`
      */
     private val TOOL_CALL_OPEN_REGEX =
         Regex("""<\|?\s*tool_call\s*\|?>""")
 
     /**
-     * Permissive regex matching common hallucinated variants of the
-     * tool-call close delimiter:
-     * `<|end_tool_call|>`, `</tool_call>`, `<|end_tool_call>`, `<end_tool_call|>`,
-     * `<end_tool_call>`, `< /tool_call >`, `<| end_tool_call |>`
+     * Matches any variant of a tool-call close token:
+     * `<tool_call|>`, `<|end_tool_call|>`, `<|end_tool_call>`,
+     * `</tool_call>`, `<end_tool_call>`
      */
     private val TOOL_CALL_CLOSE_REGEX =
-        Regex("""<\|?\s*/?(?:end_)?tool_call\s*\|?>""")
+        Regex("""</?(?:\|?\s*(?:end_)?tool_call\s*\|?|tool_call\|)>""")
 
-    /** Permissive regex for tool-result open delimiter variants. */
-    private val TOOL_RESULT_OPEN_REGEX =
-        Regex("""<\|?\s*tool_result\s*\|?>""")
+    /** Matches any variant of tool_response open. */
+    private val TOOL_RESP_OPEN_REGEX =
+        Regex("""<\|?\s*tool_(?:response|result)\s*\|?>""")
 
-    /** Permissive regex for tool-result close delimiter variants. */
-    private val TOOL_RESULT_CLOSE_REGEX =
-        Regex("""<\|?\s*/?(?:end_)?tool_result\s*\|?>""")
+    /** Matches any variant of tool_response close. */
+    private val TOOL_RESP_CLOSE_REGEX =
+        Regex("""</?(?:\|?\s*(?:end_)?tool_(?:response|result)\s*\|?|tool_(?:response|result)\|)>""")
 
-    /**
-     * Combined regex that matches ANY tool-related delimiter variant.
-     * Used by [stripToolTokens] and [getVisibleText] to filter UI output.
-     */
+    /** Matches ANY tool delimiter variant (for stripping). */
     private val ANY_TOOL_DELIMITER_REGEX =
-        Regex("""<\|?\s*/?(?:end_)?(?:tool_call|tool_result)\s*\|?>""")
+        Regex("""</?(?:\|?\s*(?:end_)?(?:tool_call|tool_response|tool_result|tool)\s*\|?|(?:tool_call|tool_response|tool_result|tool)\|)>""")
 
-    /**
-     * Detects a partial (potentially incomplete) tool-call opener building up
-     * at the end of streamed text. Used to suppress premature UI emission.
-     * Matches prefixes like `<`, `<|`, `<|tool`, `<tool_c`, etc.
-     */
-    private val PARTIAL_TOOL_CALL_OPEN_REGEX =
-        Regex("""<\|?\s*t(?:o(?:o(?:l(?:_(?:c(?:a(?:l(?:l\s*\|?>?)?)?)?)?)?)?)?)?$""")
+    // ── Data classes ────────────────────────────────────────────────
 
     /**
      * A parsed tool invocation extracted from model output.
@@ -84,61 +91,55 @@ object ToolCallParser {
         val raw: String
     )
 
+    // ── Public API ──────────────────────────────────────────────────
+
     /**
-     * Attempts to extract a [ParsedToolCall] from the model's accumulated output.
-     * Uses permissive regex to tolerate hallucinated delimiter variants.
+     * Attempts to extract a [ParsedToolCall] from the model's accumulated
+     * output. Tries the native Gemma 4 `call:name{...}` format first,
+     * then falls back to JSON extraction for hallucinated outputs.
      *
-     * @return The parsed call and the remaining text **after** the closing delimiter,
-     *         or `null` if no complete tool-call block is present yet.
+     * @return The parsed call and the remaining text **after** the closing
+     *         delimiter, or `null` if no complete tool-call block is present.
      */
     fun extractToolCall(modelOutput: String): Pair<ParsedToolCall, String>? {
         val openMatch = TOOL_CALL_OPEN_REGEX.find(modelOutput) ?: return null
-        val searchStart = openMatch.range.last + 1
+        val afterOpen = openMatch.range.last + 1
 
-        // Find the close delimiter AFTER the open. We need a close that is NOT
-        // the same match as the open (the close regex is a superset of the open).
-        val closeMatch = findCloseDelimiter(modelOutput, searchStart) ?: return null
+        // Find the close delimiter AFTER the open token.
+        val closeMatch = findCloseAfter(modelOutput, afterOpen) ?: return null
 
-        val jsonBlock = modelOutput
-            .substring(searchStart, closeMatch.range.first)
+        val payload = modelOutput
+            .substring(afterOpen, closeMatch.range.first)
             .trim()
 
         val remaining = modelOutput.substring(closeMatch.range.last + 1)
 
-        return try {
-            val json = JSONObject(jsonBlock)
-            val name = json.getString("name")
-            val argsJson = json.optJSONObject("arguments") ?: JSONObject()
-            val args = mutableMapOf<String, String>()
-            argsJson.keys().forEach { key -> args[key] = argsJson.optString(key, "") }
-            ParsedToolCall(name = name, arguments = args, raw = jsonBlock) to remaining
-        } catch (_: JSONException) {
-            null
+        // Try native Gemma 4 format: call:func_name{arg:<|"|>val<|"|>, ...}
+        val nativeResult = parseNativePayload(payload)
+        if (nativeResult != null) {
+            return nativeResult.copy(raw = payload) to remaining
         }
+
+        // Fallback: try JSON format (hallucinated or prompted)
+        val jsonResult = parseJsonPayload(payload)
+        if (jsonResult != null) {
+            return jsonResult.copy(raw = payload) to remaining
+        }
+
+        Log.w(TAG, "Could not parse tool-call payload: ${payload.take(200)}")
+        return null
     }
 
     /**
-     * Finds the closing delimiter after [startIndex]. The close regex is a
-     * superset of the open regex, so we look for either `</tool_call>` style
-     * or `<|end_tool_call|>` style, but also accept any match of the close
-     * regex that is positioned after the JSON content.
+     * Formats a tool result in the official Gemma 4 `<|tool_response>` format.
+     *
+     * @param toolName Name of the tool that was executed.
+     * @param result   The tool's output string.
      */
-    private fun findCloseDelimiter(text: String, startIndex: Int): MatchResult? {
-        val sub = text.substring(startIndex)
-        // First try dedicated end/close patterns
-        val endMatch = Regex("""<\|?\s*/?(?:end_)?tool_call\s*\|?>""").find(sub)
-        return endMatch?.let {
-            // Adjust range to be relative to original string
-            Regex("""<\|?\s*/?(?:end_)?tool_call\s*\|?>""").find(text, startIndex)
-        }
+    fun formatToolResult(toolName: String, result: String): String {
+        val escapedResult = result.replace("\"", "\\\"")
+        return "$TOOL_RESP_OPEN\nresponse:$toolName{result:$STR_DELIM$escapedResult$STR_DELIM}\n$TOOL_RESP_CLOSE"
     }
-
-    /**
-     * Wraps a tool result into the injection format that the model expects
-     * when generating its next turn.
-     */
-    fun formatToolResult(result: String): String =
-        "$TOOL_RESULT_OPEN\n$result\n$TOOL_RESULT_CLOSE"
 
     /**
      * Returns `true` when the model output contains a (possibly incomplete)
@@ -148,41 +149,140 @@ object ToolCallParser {
         TOOL_CALL_OPEN_REGEX.containsMatchIn(modelOutput)
 
     /**
-     * Returns `true` when the accumulated text ends with what looks like the
-     * beginning of a tool-call delimiter being streamed token-by-token.
-     * This is used to suppress partial delimiters from the UI stream.
-     */
-    fun endsWithPartialToolToken(text: String): Boolean {
-        // Check the last 20 chars for a partial match
-        val tail = if (text.length > 20) text.substring(text.length - 20) else text
-        return PARTIAL_TOOL_CALL_OPEN_REGEX.containsMatchIn(tail)
-    }
-
-    /**
-     * Strips all tool-call / tool-result delimiters (including hallucinated
-     * variants) from [text] so that the user-facing message is clean.
+     * Strips all tool-related delimiter tokens (including hallucinated
+     * variants) from [text] so the user-facing message is clean.
      */
     fun stripToolTokens(text: String): String =
         ANY_TOOL_DELIMITER_REGEX.replace(text, "").trim()
 
     /**
-     * Extracts only the text that should be visible to the user from the
-     * model's streaming output. Removes:
-     * 1. Everything from the first tool-call opener onwards.
-     * 2. Any hallucinated delimiter tokens.
-     *
-     * @param accumulatedOutput The full accumulated model output so far.
-     * @return The clean, user-visible portion of the output.
+     * Extracts only the text that should be visible to the user.
+     * Everything from the first tool-call opener onwards is removed.
      */
     fun getVisibleText(accumulatedOutput: String): String {
-        // If a tool-call block has started, only show text before it.
         val openMatch = TOOL_CALL_OPEN_REGEX.find(accumulatedOutput)
-        val textBeforeToolCall = if (openMatch != null) {
+        val textBefore = if (openMatch != null) {
             accumulatedOutput.substring(0, openMatch.range.first)
         } else {
             accumulatedOutput
         }
-        // Strip any stray delimiter tokens that may have leaked.
-        return stripToolTokens(textBeforeToolCall)
+        return stripToolTokens(textBefore)
+    }
+
+    /**
+     * Builds the Gemma 4 tool definition block for inclusion in the
+     * system prompt.
+     *
+     * @param name         Tool name.
+     * @param description  Human-readable description.
+     * @param parameters   Parameter name → description map.
+     */
+    fun buildToolDefinition(
+        name: String,
+        description: String,
+        parameters: Map<String, String>
+    ): String = buildString {
+        append("${TOOL_DEF_OPEN}declaration:$name{")
+        append("description:$STR_DELIM$description$STR_DELIM,")
+        append("parameters:{properties:{")
+        parameters.entries.forEachIndexed { index, (key, desc) ->
+            if (index > 0) append(",")
+            append("$key:{description:$STR_DELIM$desc$STR_DELIM,type:${STR_DELIM}STRING$STR_DELIM}")
+        }
+        append("},type:${STR_DELIM}OBJECT$STR_DELIM}}")
+        append(TOOL_DEF_CLOSE)
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────
+
+    /**
+     * Finds a close-delimiter match after [startIndex] in [text].
+     * Must find a match distinct from the open token.
+     */
+    private fun findCloseAfter(text: String, startIndex: Int): MatchResult? {
+        val sub = text.substring(startIndex)
+        return TOOL_CALL_CLOSE_REGEX.find(sub)?.let {
+            TOOL_CALL_CLOSE_REGEX.find(text, startIndex)
+        }
+    }
+
+    /**
+     * Parses the native Gemma 4 `call:func_name{key:<|"|>val<|"|>,...}` format.
+     */
+    private fun parseNativePayload(payload: String): ParsedToolCall? {
+        // Pattern: call:function_name{...}
+        val callMatch = Regex("""call:(\w+)\{(.*)\}""", RegexOption.DOT_MATCHES_ALL)
+            .find(payload) ?: return null
+
+        val funcName = callMatch.groupValues[1]
+        val argsBlock = callMatch.groupValues[2]
+
+        val args = parseGemma4Args(argsBlock)
+        return ParsedToolCall(name = funcName, arguments = args, raw = payload)
+    }
+
+    /**
+     * Parses Gemma 4 key-value arguments from inside `{...}`.
+     * Handles `<|"|>` delimited string values and bare values.
+     */
+    private fun parseGemma4Args(block: String): Map<String, String> {
+        val args = mutableMapOf<String, String>()
+        // Match: key:<|"|>value<|"|>  or  key:barevalue
+        val pattern = Regex("""(\w+):<\|"\|>(.*?)<\|"\|>""")
+        pattern.findAll(block).forEach { match ->
+            args[match.groupValues[1]] = match.groupValues[2]
+        }
+        // Also try bare values like key:123
+        if (args.isEmpty()) {
+            val barePattern = Regex("""(\w+):([^,}]+)""")
+            barePattern.findAll(block).forEach { match ->
+                val key = match.groupValues[1]
+                val value = match.groupValues[2].trim()
+                if (key !in args) {
+                    args[key] = value
+                }
+            }
+        }
+        return args
+    }
+
+    /**
+     * Fallback: tries to parse the payload as JSON.
+     * Handles `{"name": "...", "arguments": {...}}` format from hallucinations.
+     */
+    private fun parseJsonPayload(payload: String): ParsedToolCall? {
+        // Try to find JSON within the payload
+        val jsonStr = extractJsonFromString(payload) ?: return null
+        return try {
+            val json = JSONObject(jsonStr)
+            val name = json.getString("name")
+            val argsJson = json.optJSONObject("arguments") ?: JSONObject()
+            val args = mutableMapOf<String, String>()
+            argsJson.keys().forEach { key -> args[key] = argsJson.optString(key, "") }
+            ParsedToolCall(name = name, arguments = args, raw = payload)
+        } catch (_: JSONException) {
+            null
+        }
+    }
+
+    /**
+     * Extracts a JSON object substring from text (finds first `{` and
+     * its matching `}`).
+     */
+    private fun extractJsonFromString(text: String): String? {
+        val start = text.indexOf('{')
+        if (start == -1) return null
+
+        var depth = 0
+        for (i in start until text.length) {
+            when (text[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return text.substring(start, i + 1)
+                }
+            }
+        }
+        return null
     }
 }

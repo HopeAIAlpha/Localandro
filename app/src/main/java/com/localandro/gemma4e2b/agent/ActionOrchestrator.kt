@@ -153,9 +153,17 @@ class ActionOrchestrator(
                         }
                     }
 
-                    // Record tool call in history.
+                    // Record the raw model output (including the tool-call
+                    // token) so it can be replayed into context correctly.
                     conversationHistory.add(
-                        Message(role = MessageRole.TOOL_CALL, content = parsedCall.raw)
+                        Message(
+                            role = MessageRole.TOOL_CALL,
+                            content = "<|tool_call>call:${parsedCall.name}{${
+                                parsedCall.arguments.entries.joinToString(",") { (k, v) ->
+                                    "$k:<|\"|>$v<|\"|>"
+                                }
+                            }}<tool_call|>"
+                        )
                     )
 
                     // ── EXECUTING phase ─────────────────────────────
@@ -190,8 +198,11 @@ class ActionOrchestrator(
                         is ToolResult.Denied -> "DENIED: User declined execution of ${parsedCall.name}."
                     }
 
-                    // Inject tool result into conversation.
-                    val toolResultFormatted = ToolCallParser.formatToolResult(resultText)
+                    // Inject tool result into conversation using Gemma 4 format.
+                    val toolResultFormatted = ToolCallParser.formatToolResult(
+                        toolName = parsedCall.name,
+                        result = resultText
+                    )
                     conversationHistory.add(
                         Message(role = MessageRole.TOOL_RESULT, content = toolResultFormatted)
                     )
@@ -270,39 +281,44 @@ class ActionOrchestrator(
         append(toolRegistry.buildCatalogue())
     }
 
+    /**
+     * Builds the formatted prompt from context messages using Gemma 4's
+     * native turn tokens: `<|turn>role ... <turn|>`.
+     */
     private fun buildPromptFromContext(messages: List<Message>): String = buildString {
         messages.forEach { msg ->
             when (msg.role) {
                 MessageRole.SYSTEM -> {
-                    appendLine("<start_of_turn>system")
+                    appendLine("<|turn>system")
                     appendLine(msg.content)
-                    appendLine("<end_of_turn>")
+                    appendLine("<turn|>")
                 }
                 MessageRole.USER -> {
-                    appendLine("<start_of_turn>user")
+                    appendLine("<|turn>user")
                     appendLine(msg.content)
-                    appendLine("<end_of_turn>")
+                    appendLine("<turn|>")
                 }
                 MessageRole.MODEL -> {
-                    appendLine("<start_of_turn>model")
+                    appendLine("<|turn>model")
                     appendLine(msg.content)
-                    appendLine("<end_of_turn>")
+                    appendLine("<turn|>")
                 }
                 MessageRole.TOOL_CALL -> {
-                    appendLine("<start_of_turn>model")
-                    appendLine("<|tool_call|>")
+                    // Model's tool call is part of the model turn.
+                    appendLine("<|turn>model")
                     appendLine(msg.content)
-                    appendLine("<|end_tool_call|>")
-                    appendLine("<end_of_turn>")
+                    appendLine("<turn|>")
                 }
                 MessageRole.TOOL_RESULT -> {
-                    appendLine("<start_of_turn>tool")
+                    // Tool results go in a dedicated model turn containing
+                    // the <|tool_response> block, following Gemma 4 convention.
+                    appendLine("<|turn>model")
                     appendLine(msg.content)
-                    appendLine("<end_of_turn>")
+                    appendLine("<turn|>")
                 }
             }
         }
         // Prompt the model to generate its turn.
-        appendLine("<start_of_turn>model")
+        appendLine("<|turn>model")
     }
 }

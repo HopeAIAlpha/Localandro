@@ -1,6 +1,7 @@
 package com.localandro.gemma4e2b.tools
 
 import android.util.Log
+import com.localandro.gemma4e2b.agent.ToolCallParser
 
 /**
  * Central registry of all available tools.
@@ -36,25 +37,24 @@ class ToolRegistry {
     fun all(): List<Tool> = tools.values.toList()
 
     /**
-     * Builds the tool catalogue that is appended to the system prompt.
+     * Builds the tool catalogue using Gemma 4's native `<|tool>` definition
+     * format. Each tool is emitted as a `declaration:` block that the model
+     * was trained to recognize.
      *
-     * Format (one block per tool):
+     * Format per tool:
      * ```
-     * Available tools:
-     * - tool_name: description
-     *   Parameters: { "param": "description", ... }
+     * <|tool>declaration:tool_name{description:<|"|>...<|"|>,parameters:{...}}<tool|>
      * ```
      */
     fun buildCatalogue(): String = buildString {
-        appendLine("Available tools:")
         tools.values.sortedBy { it.name }.forEach { tool ->
-            appendLine("- ${tool.name}: ${tool.description}")
-            if (tool.parameterSchema.isNotEmpty()) {
-                val params = tool.parameterSchema.entries.joinToString(", ") {
-                    "\"${it.key}\": \"${it.value}\""
-                }
-                appendLine("  Parameters: { $params }")
-            }
+            appendLine(
+                ToolCallParser.buildToolDefinition(
+                    name = tool.name,
+                    description = tool.description,
+                    parameters = tool.parameterSchema
+                )
+            )
         }
     }
 }
