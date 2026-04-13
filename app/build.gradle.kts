@@ -84,7 +84,7 @@ dependencies {
     // OkHttp for model download
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // MediaPipe LLM Inference (LiteRT-LM compatible engine for .task models)
+    // MediaPipe LLM Inference (LiteRT-LM compatible engine for .litertlm models)
     implementation("com.google.mediapipe:tasks-genai:0.10.27")
 
     // Coroutines

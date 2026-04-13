@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -24,29 +25,64 @@ import java.util.concurrent.TimeUnit
 class ModelDownloadManager(private val context: Context) {
 
     companion object {
-        /** Public Hugging Face URL for the Gemma 4 E2B LiteRT-LM task file. */
+        /** Public Hugging Face URL for the Gemma 4 E2B native LiteRT-LM binary. */
         const val MODEL_URL =
-            "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task?download=true"
+            "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm?download=true"
 
         /** Local file name stored inside filesDir. */
-        const val MODEL_FILE_NAME = "gemma-4-E2B-it-web.task"
+        const val MODEL_FILE_NAME = "gemma-4-E2B-it.litertlm"
 
         private const val BUFFER_SIZE = 8 * 1024 // 8 KB
+
+        /** Minimum expected model size (100 MB) for integrity validation. */
+        private const val MIN_MODEL_SIZE_BYTES = 100L * 1024 * 1024
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.MINUTES)
         .writeTimeout(5, TimeUnit.MINUTES)
-        .followRedirects(true)
-        .followSslRedirects(true)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .addInterceptor(redirectInterceptor())
         .build()
+
+    /**
+     * Custom redirect interceptor that strips the `Authorization` header when
+     * the redirect target host differs from `huggingface.co`.
+     * This prevents leaking the HF token to CDN hosts (e.g. `cdn-lfs.huggingface.co`).
+     */
+    private fun redirectInterceptor(): Interceptor = Interceptor { chain ->
+        var request = chain.request()
+        var response = chain.proceed(request)
+        var redirectCount = 0
+        val maxRedirects = 10
+
+        while (response.isRedirect && redirectCount < maxRedirects) {
+            val location = response.header("Location") ?: break
+            response.close()
+
+            val newUrl = request.url.resolve(location) ?: break
+            val builder = request.newBuilder().url(newUrl)
+
+            // Strip Authorization on cross-host redirects
+            if (!newUrl.host.equals("huggingface.co", ignoreCase = true)) {
+                builder.removeHeader("Authorization")
+            }
+
+            request = builder.build()
+            response = chain.proceed(request)
+            redirectCount++
+        }
+
+        response
+    }
 
     /** Returns the expected model [File] inside the app's private storage. */
     fun getModelFile(): File = File(context.filesDir, MODEL_FILE_NAME)
 
-    /** Returns `true` when the model file already exists on disk. */
-    fun isModelDownloaded(): Boolean = getModelFile().exists() && getModelFile().length() > 0
+    /** Returns `true` when the model file already exists and passes integrity check. */
+    fun isModelDownloaded(): Boolean = getModelFile().let { it.exists() && it.length() > MIN_MODEL_SIZE_BYTES }
 
     /**
      * Starts the authenticated download and emits [DownloadState] updates.
@@ -102,6 +138,16 @@ class ModelDownloadManager(private val context: Context) {
             if (!tempFile.renameTo(destination)) {
                 tempFile.copyTo(destination, overwrite = true)
                 tempFile.delete()
+            }
+
+            // Integrity check: the native .litertlm binary must exceed 100 MB.
+            if (destination.length() < MIN_MODEL_SIZE_BYTES) {
+                destination.delete()
+                emit(DownloadState.Error(
+                    "Integrity check failed: file is ${destination.length()} bytes " +
+                    "(expected > ${MIN_MODEL_SIZE_BYTES} bytes)"
+                ))
+                return@flow
             }
 
             emit(DownloadState.Completed(destination.absolutePath))

@@ -18,7 +18,7 @@ import java.io.File
  *
  * Uses [LlmInference] for model loading with GPU offload, and
  * [LlmInferenceSession] for stateful, streaming token generation
- * targeting the Gemma 4 E2B `.task` model.
+ * targeting the Gemma 4 E2B `.litertlm` model.
  *
  * @param context Application context required by the native engine.
  */
