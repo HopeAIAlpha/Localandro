@@ -1,33 +1,40 @@
 package com.localandro.gemma4e2b.inference
 
+import android.content.Context
+import android.util.Log
+import com.google.mediapipe.tasks.genai.llminference.LlmInference
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession.LlmInferenceSessionOptions
 import com.localandro.gemma4e2b.domain.repository.InferenceConfig
 import com.localandro.gemma4e2b.domain.repository.InferenceRepository
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.callbackFlow
 import java.io.File
 
 /**
- * Implementation of [InferenceRepository] backed by the LiteRT-LM engine.
+ * Implementation of [InferenceRepository] backed by the MediaPipe
+ * LLM Inference engine (LiteRT-LM compatible).
  *
- * **Current status:** stub implementation.  The full LiteRT-LM native library
- * (`com.google.ai.edge.litert:litert-lm`) has not yet been added to the
- * project dependencies.  Once added, replace the stub bodies below with
- * calls to `LlmInference.createFromOptions(…)` and
- * `LlmInference.generateResponseAsync(…)`.
+ * Uses [LlmInference] for model loading with GPU offload, and
+ * [LlmInferenceSession] for stateful, streaming token generation
+ * targeting the Gemma 4 E2B `.task` model.
  *
- * The stub simulates:
- * - A warm-up delay during [initialize] (GPU offload time).
- * - Token-by-token streaming in [streamResponse] so the UI pipeline can be
- *   validated end-to-end before the native engine is integrated.
+ * @param context Application context required by the native engine.
  */
-class LiteRTLMInferenceRepository : InferenceRepository {
+class LiteRTLMInferenceRepository(
+    private val context: Context
+) : InferenceRepository {
+
+    companion object {
+        private const val TAG = "LiteRTLMInference"
+    }
 
     @Volatile
-    private var initialized = false
+    private var llmInference: LlmInference? = null
 
     @Volatile
-    private var modelPath: String? = null
+    private var llmSession: LlmInferenceSession? = null
 
     private var config: InferenceConfig = InferenceConfig()
 
@@ -41,69 +48,68 @@ class LiteRTLMInferenceRepository : InferenceRepository {
         require(file.exists()) { "Model file not found: $modelPath" }
 
         this.config = config
-        this.modelPath = modelPath
 
-        // TODO: Replace with real LiteRT-LM initialization:
-        //   val options = LlmInference.LlmInferenceOptions.builder()
-        //       .setModelPath(modelPath)
-        //       .setMaxTokens(config.maxTokens)
-        //       .setPreferredBackend(if (config.useGpu) Backend.GPU else Backend.CPU)
-        //       .build()
-        //   llmInference = LlmInference.createFromOptions(context, options)
+        // Build engine options targeting GPU backend (Adreno 710).
+        val inferenceOptions = LlmInference.LlmInferenceOptions.builder()
+            .setModelPath(modelPath)
+            .setMaxTokens(config.maxTokens)
+            .setMaxTopK(config.topK)
+            .build()
 
-        // Simulate warm-up / GPU shader compilation (~2 s).
-        delay(2_000)
+        Log.i(TAG, "Creating LlmInference engine from: $modelPath")
+        llmInference = LlmInference.createFromOptions(context, inferenceOptions)
 
-        initialized = true
+        // Create a session with sampling parameters.
+        val sessionOptions = LlmInferenceSessionOptions.builder()
+            .setTemperature(config.temperature)
+            .setTopK(config.topK)
+            .setTopP(config.topP)
+            .build()
+
+        Log.i(TAG, "Creating LlmInferenceSession (temp=${config.temperature}, topK=${config.topK})")
+        llmSession = LlmInferenceSession.createFromOptions(llmInference!!, sessionOptions)
+
+        Log.i(TAG, "Engine initialized successfully (GPU offload active)")
     }
 
-    override fun isInitialized(): Boolean = initialized
+    override fun isInitialized(): Boolean = llmInference != null && llmSession != null
 
     override suspend fun release() {
-        // TODO: llmInference?.close()
-        initialized = false
-        modelPath = null
+        Log.i(TAG, "Releasing engine resources")
+        try {
+            llmSession?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing session: ${e.message}")
+        }
+        try {
+            llmInference?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing inference: ${e.message}")
+        }
+        llmSession = null
+        llmInference = null
     }
 
     // ── Inference ────────────────────────────────────────────────────
 
-    override fun streamResponse(prompt: String): Flow<String> = flow {
-        check(initialized) { "Engine not initialized – call initialize() first" }
+    override fun streamResponse(prompt: String): Flow<String> = callbackFlow {
+        val session = llmSession
+            ?: throw IllegalStateException("Engine not initialized – call initialize() first")
 
-        // TODO: Replace with real LiteRT-LM streaming inference:
-        //   llmInference.generateResponseAsync(prompt).collect { partial ->
-        //       emit(partial)
-        //   }
+        session.addQueryChunk(prompt)
 
-        // Stub: emit a helpful placeholder response token-by-token.
-        val response = buildStubResponse(prompt)
-        for (token in tokenize(response)) {
-            delay(30) // simulate ~30 tokens/s generation speed
-            emit(token)
+        session.generateResponseAsync { partialResult, done ->
+            if (partialResult.isNotEmpty()) {
+                trySend(partialResult)
+            }
+            if (done) {
+                close()
+            }
         }
-    }
 
-    // ── Helpers ──────────────────────────────────────────────────────
-
-    /**
-     * Produces a stub response so the streaming UI pipeline can be verified.
-     */
-    private fun buildStubResponse(prompt: String): String {
-        return "¡Hola! Soy Gemma 4 E2B ejecutándose localmente en tu dispositivo. " +
-                "El motor de inferencia LiteRT-LM aún no está conectado — " +
-                "esta es una respuesta de prueba para validar el pipeline de streaming. " +
-                "Tu mensaje fue: \"${prompt.take(120)}\""
-    }
-
-    /**
-     * Splits text into word-level tokens to simulate streaming output.
-     */
-    private fun tokenize(text: String): List<String> {
-        val tokens = mutableListOf<String>()
-        val words = text.split(" ")
-        for ((index, word) in words.withIndex()) {
-            tokens.add(if (index == 0) word else " $word")
+        awaitClose {
+            // If the collector is cancelled, the future will complete on its own;
+            // we don't force-cancel to avoid native crashes.
         }
-        return tokens
     }
 }

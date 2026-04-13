@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // Single repository instance shared across configuration changes.
-        val inferenceRepository: InferenceRepository = LiteRTLMInferenceRepository()
+        val inferenceRepository: InferenceRepository = LiteRTLMInferenceRepository(applicationContext)
 
         setContent {
             LocalandroTheme {
