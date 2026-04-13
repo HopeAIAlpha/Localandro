@@ -29,5 +29,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Inference engine service running in an isolated process.
+            All LiteRT-LM JNI calls happen here; if this process crashes
+            (OOM / SIGSEGV) the main UI process stays alive and reconnects.
+        -->
+        <service
+            android:name=".inference.InferenceEngineService"
+            android:process=":inference_engine"
+            android:exported="false" />
     </application>
 </manifest>

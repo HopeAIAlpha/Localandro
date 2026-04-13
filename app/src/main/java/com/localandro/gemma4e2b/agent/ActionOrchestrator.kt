@@ -4,12 +4,14 @@ import android.util.Log
 import com.localandro.gemma4e2b.domain.model.Message
 import com.localandro.gemma4e2b.domain.model.MessageRole
 import com.localandro.gemma4e2b.domain.repository.InferenceRepository
+import com.localandro.gemma4e2b.inference.InferenceEngineDisconnectedException
 import com.localandro.gemma4e2b.memory.LongTermMemory
 import com.localandro.gemma4e2b.memory.SlidingWindowContext
 import com.localandro.gemma4e2b.security.SecurityPolicy
 import com.localandro.gemma4e2b.tools.ToolRegistry
 import com.localandro.gemma4e2b.tools.ToolResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -137,40 +139,67 @@ class ActionOrchestrator(
                 // Stream model response.
                 val fullResponse = StringBuilder()
                 var repetitionDetected = false
+                var engineCrashed = false
 
-                inferenceRepository.streamResponse(prompt)
-                    .flowOn(Dispatchers.IO)
-                    .catch { e ->
-                        Log.e(TAG, "Inference error on iteration $iterations", e)
-                        _agentState.update {
-                            it.copy(
-                                phase = AgentPhase.ERROR,
-                                errorMessage = e.localizedMessage ?: "Inference error"
-                            )
+                try {
+                    inferenceRepository.streamResponse(prompt)
+                        .flowOn(Dispatchers.IO)
+                        .catch { e ->
+                            if (e is InferenceEngineDisconnectedException) {
+                                // The inference engine process died.  Signal
+                                // recovery below instead of treating it as
+                                // a fatal error.
+                                engineCrashed = true
+                                Log.w(TAG, "Inference engine disconnected", e)
+                                return@catch
+                            }
+                            Log.e(TAG, "Inference error on iteration $iterations", e)
+                            _agentState.update {
+                                it.copy(
+                                    phase = AgentPhase.ERROR,
+                                    errorMessage = e.localizedMessage ?: "Inference error"
+                                )
+                            }
+                            onError(e.localizedMessage ?: "Inference error")
                         }
-                        onError(e.localizedMessage ?: "Inference error")
-                    }
-                    .onCompletion { /* handled below */ }
-                    .collect { token ->
-                        fullResponse.append(token)
+                        .onCompletion { /* handled below */ }
+                        .collect { token ->
+                            fullResponse.append(token)
 
-                        // Safety: stop collecting if output is too long or
-                        // the model is stuck in a repetitive loop.
-                        if (fullResponse.length > MAX_OUTPUT_CHARS) {
-                            Log.w(TAG, "Output exceeded $MAX_OUTPUT_CHARS chars — truncating")
-                            return@collect
-                        }
-                        if (isRepeating(fullResponse.toString())) {
-                            Log.w(TAG, "Repetition detected — stopping generation")
-                            repetitionDetected = true
-                            return@collect
-                        }
+                            // Safety: stop collecting if output is too long or
+                            // the model is stuck in a repetitive loop.
+                            if (fullResponse.length > MAX_OUTPUT_CHARS) {
+                                Log.w(TAG, "Output exceeded $MAX_OUTPUT_CHARS chars — truncating")
+                                return@collect
+                            }
+                            if (isRepeating(fullResponse.toString())) {
+                                Log.w(TAG, "Repetition detected — stopping generation")
+                                repetitionDetected = true
+                                return@collect
+                            }
 
-                        // Only emit user-visible text to the UI — never leak
-                        // tool-call delimiters or JSON payloads.
-                        val visibleText = ToolCallParser.getVisibleText(fullResponse.toString())
-                        onToken(visibleText)
-                    }
+                            // Only emit user-visible text to the UI — never leak
+                            // tool-call delimiters or JSON payloads.
+                            val visibleText = ToolCallParser.getVisibleText(fullResponse.toString())
+                            onToken(visibleText)
+                        }
+                } catch (e: InferenceEngineDisconnectedException) {
+                    // streamResponse() itself may throw before returning a
+                    // Flow (e.g. when serviceMessenger is null).
+                    engineCrashed = true
+                    Log.w(TAG, "Inference engine disconnected (direct throw)", e)
+                }
+
+                // ── Crash recovery ──────────────────────────────────
+                // If the inference engine process crashed, transition to
+                // PLANNING and retry.  RemoteInferenceRepository handles
+                // the actual service reconnection transparently.
+                if (engineCrashed) {
+                    Log.w(TAG, "Recovering from engine crash — returning to PLANNING (iteration $iterations)")
+                    _agentState.update { it.copy(phase = AgentPhase.PLANNING) }
+                    delay(1500) // Brief pause to let the service process restart
+                    continue
+                }
 
                 if (_agentState.value.phase == AgentPhase.ERROR) return
 

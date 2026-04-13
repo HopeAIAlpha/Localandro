@@ -15,7 +15,7 @@ import androidx.compose.ui.Modifier
 import com.localandro.gemma4e2b.agent.ActionOrchestrator
 import com.localandro.gemma4e2b.domain.repository.InferenceRepository
 import com.localandro.gemma4e2b.download.ModelDownloadManager
-import com.localandro.gemma4e2b.inference.LiteRTLMInferenceRepository
+import com.localandro.gemma4e2b.inference.RemoteInferenceRepository
 import com.localandro.gemma4e2b.memory.LongTermMemory
 import com.localandro.gemma4e2b.memory.SlidingWindowContext
 import com.localandro.gemma4e2b.security.SecurityPolicy
@@ -48,7 +48,9 @@ class MainActivity : ComponentActivity() {
         }
 
         // Single repository instance shared across configuration changes.
-        val inferenceRepository: InferenceRepository = LiteRTLMInferenceRepository(applicationContext)
+        // Uses IPC to delegate inference to a separate process (:inference_engine)
+        // so that native JNI crashes don't kill the main UI process.
+        val inferenceRepository: InferenceRepository = RemoteInferenceRepository(applicationContext)
 
         // ── Agentic stack setup ─────────────────────────────────────
         val toolRegistry = ToolRegistry()
