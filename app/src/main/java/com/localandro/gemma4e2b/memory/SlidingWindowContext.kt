@@ -25,7 +25,7 @@ class SlidingWindowContext(
         /** Default context window size matching Gemma 4 E2B's capacity. */
         const val DEFAULT_MAX_TOKENS = 4096
 
-        /** Conservative estimate: ~3.5 chars/token for mixed lang. */
+        /** Conservative estimate: ~4 chars/token for mixed-language content. */
         const val DEFAULT_CHARS_PER_TOKEN = 4
     }
 

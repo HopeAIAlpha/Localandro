@@ -13,7 +13,6 @@ import com.localandro.gemma4e2b.domain.repository.InferenceRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -124,28 +123,18 @@ class LiteRTLMInferenceRepository(
             ?: throw IllegalStateException("Engine not initialized – call initialize() first")
 
         // Acquire the mutex before the native call begins and hold it for
-        // the entire streaming duration. The Flow's onStart operator
-        // suspends until the lock is available, guaranteeing that only
-        // one inference request touches the JNI layer at a time.
-        return conv.sendMessageAsync(prompt)
-            .map { message -> message.toString() }
-            .onStart { inferenceMutex.lock() }
-            .catch { e ->
-                inferenceMutex.unlock()
-                Log.e(TAG, "Streaming error: ${e.message}", e)
-                throw e
-            }
-            .let { flow ->
-                // Wrap in a new flow that unlocks on normal completion.
-                kotlinx.coroutines.flow.flow {
-                    try {
-                        flow.collect { emit(it) }
-                    } finally {
-                        if (inferenceMutex.isLocked) {
-                            inferenceMutex.unlock()
-                        }
+        // the entire streaming duration. This guarantees that only one
+        // inference request touches the JNI layer at a time.
+        return kotlinx.coroutines.flow.flow {
+            inferenceMutex.withLock {
+                conv.sendMessageAsync(prompt)
+                    .map { message -> message.toString() }
+                    .catch { e ->
+                        Log.e(TAG, "Streaming error: ${e.message}", e)
+                        throw e
                     }
-                }
+                    .collect { emit(it) }
             }
+        }
     }
 }
