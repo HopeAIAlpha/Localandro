@@ -3,6 +3,8 @@ package com.localandro.gemma4e2b.ui.chat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.localandro.gemma4e2b.agent.ActionOrchestrator
+import com.localandro.gemma4e2b.agent.AgentPhase
 import com.localandro.gemma4e2b.domain.model.Message
 import com.localandro.gemma4e2b.domain.model.MessageRole
 import com.localandro.gemma4e2b.domain.repository.InferenceRepository
@@ -10,9 +12,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -21,19 +20,25 @@ import kotlinx.coroutines.launch
  *
  * Responsibilities:
  * 1. Initialize the [InferenceRepository] on creation (GPU warm-up).
- * 2. Accept user messages and stream model responses token-by-token.
+ * 2. Accept user messages and route them through the [ActionOrchestrator]
+ *    for the Plan→Execute→Observe→Refine agentic loop.
  * 3. Expose a [ChatUiState] for the Compose UI to observe.
  *
  * @param inferenceRepository The on-device LLM engine abstraction.
  * @param modelPath Absolute path to the downloaded model file.
+ * @param orchestrator The agentic action orchestrator.
  */
 class ChatViewModel(
     private val inferenceRepository: InferenceRepository,
-    private val modelPath: String
+    private val modelPath: String,
+    private val orchestrator: ActionOrchestrator
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+
+    /** Exposes the agent FSM state for UI observation. */
+    val agentState: StateFlow<com.localandro.gemma4e2b.agent.AgentState> = orchestrator.agentState
 
     init {
         initializeEngine()
@@ -64,7 +69,7 @@ class ChatViewModel(
     // ── Public actions ──────────────────────────────────────────────
 
     /**
-     * Sends a user message and begins streaming the model's response.
+     * Sends a user message through the agentic orchestration loop.
      * No-op if the engine is not idle.
      */
     fun sendMessage(text: String) {
@@ -82,42 +87,41 @@ class ChatViewModel(
             )
         }
 
-        viewModelScope.launch {
-            val fullResponse = StringBuilder()
-
-            inferenceRepository.streamResponse(trimmed)
-                .flowOn(Dispatchers.IO)
-                .catch { error ->
+        viewModelScope.launch(Dispatchers.IO) {
+            orchestrator.processUserMessage(
+                userText = trimmed,
+                onToken = { visibleText ->
+                    // The orchestrator already filters tool-call tokens;
+                    // visibleText is the clean, user-facing output so far.
+                    _uiState.update {
+                        it.copy(streamBuffer = visibleText)
+                    }
+                },
+                onToolCall = { toolName ->
+                    _uiState.update {
+                        it.copy(
+                            streamBuffer = "🔧 Ejecutando: $toolName…"
+                        )
+                    }
+                },
+                onComplete = { modelMessage ->
+                    _uiState.update {
+                        it.copy(
+                            messages = it.messages + modelMessage,
+                            inferenceState = InferenceState.IDLE,
+                            streamBuffer = ""
+                        )
+                    }
+                },
+                onError = { errorMsg ->
                     _uiState.update {
                         it.copy(
                             inferenceState = InferenceState.ERROR,
-                            errorMessage = error.localizedMessage
-                                ?: "Error durante la inferencia"
+                            errorMessage = errorMsg
                         )
                     }
                 }
-                .onCompletion {
-                    // Only finalize if no error occurred.
-                    if (_uiState.value.inferenceState == InferenceState.GENERATING) {
-                        val modelMessage = Message(
-                            role = MessageRole.MODEL,
-                            content = fullResponse.toString()
-                        )
-                        _uiState.update {
-                            it.copy(
-                                messages = it.messages + modelMessage,
-                                inferenceState = InferenceState.IDLE,
-                                streamBuffer = ""
-                            )
-                        }
-                    }
-                }
-                .collect { token ->
-                    fullResponse.append(token)
-                    _uiState.update {
-                        it.copy(streamBuffer = fullResponse.toString())
-                    }
-                }
+            )
         }
     }
 
@@ -129,6 +133,7 @@ class ChatViewModel(
                 errorMessage = null
             )
         }
+        orchestrator.reset()
         initializeEngine()
     }
 
@@ -142,19 +147,20 @@ class ChatViewModel(
     // ── Factory ─────────────────────────────────────────────────────
 
     /**
-     * [ViewModelProvider.Factory] that injects the [InferenceRepository]
-     * and [modelPath] into [ChatViewModel] without requiring Hilt.
+     * [ViewModelProvider.Factory] that injects dependencies into
+     * [ChatViewModel] without requiring Hilt.
      */
     class Factory(
         private val inferenceRepository: InferenceRepository,
-        private val modelPath: String
+        private val modelPath: String,
+        private val orchestrator: ActionOrchestrator
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             require(modelClass.isAssignableFrom(ChatViewModel::class.java)) {
                 "Unknown ViewModel class: ${modelClass.name}"
             }
-            return ChatViewModel(inferenceRepository, modelPath) as T
+            return ChatViewModel(inferenceRepository, modelPath, orchestrator) as T
         }
     }
 }

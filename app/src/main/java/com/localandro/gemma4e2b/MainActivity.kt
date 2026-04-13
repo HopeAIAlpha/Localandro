@@ -12,9 +12,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.localandro.gemma4e2b.agent.ActionOrchestrator
 import com.localandro.gemma4e2b.domain.repository.InferenceRepository
 import com.localandro.gemma4e2b.download.ModelDownloadManager
 import com.localandro.gemma4e2b.inference.LiteRTLMInferenceRepository
+import com.localandro.gemma4e2b.memory.LongTermMemory
+import com.localandro.gemma4e2b.memory.SlidingWindowContext
+import com.localandro.gemma4e2b.security.SecurityPolicy
+import com.localandro.gemma4e2b.tools.FileExplorer
+import com.localandro.gemma4e2b.tools.IntentOrchestrator
+import com.localandro.gemma4e2b.tools.SystemMonitor
+import com.localandro.gemma4e2b.tools.ToolRegistry
 import com.localandro.gemma4e2b.ui.chat.ChatScreen
 import com.localandro.gemma4e2b.ui.setup.SetupScreen
 import com.localandro.gemma4e2b.ui.theme.LocalandroTheme
@@ -25,7 +33,7 @@ import com.localandro.gemma4e2b.ui.theme.LocalandroTheme
  * Implements a simple state machine at startup:
  *   1. Check whether the model file already exists in [filesDir].
  *   2. If **not** → navigate to [SetupScreen] to download it.
- *   3. If **yes** → navigate to [ChatScreen] to start inference.
+ *   3. If **yes** → navigate to [ChatScreen] with the full agentic stack.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,12 +50,31 @@ class MainActivity : ComponentActivity() {
         // Single repository instance shared across configuration changes.
         val inferenceRepository: InferenceRepository = LiteRTLMInferenceRepository(applicationContext)
 
+        // ── Agentic stack setup ─────────────────────────────────────
+        val toolRegistry = ToolRegistry()
+        IntentOrchestrator.registerAll(toolRegistry, applicationContext)
+        FileExplorer.registerAll(toolRegistry, applicationContext)
+        SystemMonitor.registerAll(toolRegistry, applicationContext)
+
+        val securityPolicy = SecurityPolicy()
+        val longTermMemory = LongTermMemory(applicationContext)
+        val slidingWindowContext = SlidingWindowContext()
+
+        val orchestrator = ActionOrchestrator(
+            inferenceRepository = inferenceRepository,
+            toolRegistry = toolRegistry,
+            securityPolicy = securityPolicy,
+            longTermMemory = longTermMemory,
+            slidingWindowContext = slidingWindowContext
+        )
+
         setContent {
             LocalandroTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     AppEntryPoint(
                         initialModelPath = initialModelPath,
-                        inferenceRepository = inferenceRepository
+                        inferenceRepository = inferenceRepository,
+                        orchestrator = orchestrator
                     )
                 }
             }
@@ -60,20 +87,23 @@ class MainActivity : ComponentActivity() {
  *
  * @param initialModelPath absolute path if the model is present, `null` otherwise.
  * @param inferenceRepository the on-device LLM engine abstraction.
+ * @param orchestrator the agentic action orchestrator.
  */
 @Composable
 private fun AppEntryPoint(
     initialModelPath: String?,
-    inferenceRepository: InferenceRepository
+    inferenceRepository: InferenceRepository,
+    orchestrator: ActionOrchestrator
 ) {
     var modelPath by remember { mutableStateOf(initialModelPath) }
 
     val currentModelPath = modelPath
     if (currentModelPath != null) {
-        // Model exists → start inference UI
+        // Model exists → start inference UI with agentic orchestration
         ChatScreen(
             modelPath = currentModelPath,
-            inferenceRepository = inferenceRepository
+            inferenceRepository = inferenceRepository,
+            orchestrator = orchestrator
         )
     } else {
         // Model missing → download it first
