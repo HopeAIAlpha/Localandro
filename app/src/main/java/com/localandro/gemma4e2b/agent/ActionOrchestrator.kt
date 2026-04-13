@@ -77,6 +77,12 @@ class ActionOrchestrator(
          * Minimum number of characters before repetition detection kicks in.
          */
         private const val REPETITION_CHECK_THRESHOLD = 60
+
+        /**
+         * Delay in milliseconds before retrying after an inference engine
+         * process crash, giving the OS time to restart the service.
+         */
+        private const val ENGINE_RESTART_DELAY_MS = 1500L
     }
 
     private val _agentState = MutableStateFlow(AgentState())
@@ -197,7 +203,7 @@ class ActionOrchestrator(
                 if (engineCrashed) {
                     Log.w(TAG, "Recovering from engine crash — returning to PLANNING (iteration $iterations)")
                     _agentState.update { it.copy(phase = AgentPhase.PLANNING) }
-                    delay(1500) // Brief pause to let the service process restart
+                    delay(ENGINE_RESTART_DELAY_MS) // Brief pause to let the service process restart
                     continue
                 }
 

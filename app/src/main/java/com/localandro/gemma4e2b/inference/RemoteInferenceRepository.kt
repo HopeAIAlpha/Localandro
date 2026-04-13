@@ -86,6 +86,7 @@ class RemoteInferenceRepository(
     private val bindMutex = Mutex()
 
     /** Signals when [ServiceConnection.onServiceConnected] fires. */
+    @Volatile
     private var connectionDeferred = CompletableDeferred<Unit>()
 
     /** Whether [Context.bindService] has been called and not yet unbound. */
@@ -145,9 +146,6 @@ class RemoteInferenceRepository(
         modelPath: String,
         config: InferenceConfig
     ): Result<Unit> = try {
-        lastModelPath = modelPath
-        lastConfig = config
-
         ensureConnected()
 
         val messenger = serviceMessenger
@@ -165,6 +163,8 @@ class RemoteInferenceRepository(
                         val success = data.getBoolean(InferenceIpcProtocol.KEY_SUCCESS)
                         if (success) {
                             initialized = true
+                            lastModelPath = modelPath
+                            lastConfig = config
                             if (cont.isActive) cont.resume(Unit)
                         } else {
                             val error = data.getString(InferenceIpcProtocol.KEY_ERROR)
