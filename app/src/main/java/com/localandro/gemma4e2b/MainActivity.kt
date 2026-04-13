@@ -12,7 +12,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.localandro.gemma4e2b.domain.repository.InferenceRepository
 import com.localandro.gemma4e2b.download.ModelDownloadManager
+import com.localandro.gemma4e2b.inference.LiteRTLMInferenceRepository
 import com.localandro.gemma4e2b.ui.chat.ChatScreen
 import com.localandro.gemma4e2b.ui.setup.SetupScreen
 import com.localandro.gemma4e2b.ui.theme.LocalandroTheme
@@ -37,10 +39,16 @@ class MainActivity : ComponentActivity() {
             null
         }
 
+        // Single repository instance shared across configuration changes.
+        val inferenceRepository: InferenceRepository = LiteRTLMInferenceRepository()
+
         setContent {
             LocalandroTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    AppEntryPoint(initialModelPath = initialModelPath)
+                    AppEntryPoint(
+                        initialModelPath = initialModelPath,
+                        inferenceRepository = inferenceRepository
+                    )
                 }
             }
         }
@@ -51,15 +59,22 @@ class MainActivity : ComponentActivity() {
  * Root composable implementing the first-run state machine.
  *
  * @param initialModelPath absolute path if the model is present, `null` otherwise.
+ * @param inferenceRepository the on-device LLM engine abstraction.
  */
 @Composable
-private fun AppEntryPoint(initialModelPath: String?) {
+private fun AppEntryPoint(
+    initialModelPath: String?,
+    inferenceRepository: InferenceRepository
+) {
     var modelPath by remember { mutableStateOf(initialModelPath) }
 
     val currentModelPath = modelPath
     if (currentModelPath != null) {
         // Model exists → start inference UI
-        ChatScreen(modelPath = currentModelPath)
+        ChatScreen(
+            modelPath = currentModelPath,
+            inferenceRepository = inferenceRepository
+        )
     } else {
         // Model missing → download it first
         SetupScreen(
