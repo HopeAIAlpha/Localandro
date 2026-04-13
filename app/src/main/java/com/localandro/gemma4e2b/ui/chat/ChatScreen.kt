@@ -42,35 +42,67 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.localandro.gemma4e2b.agent.ActionOrchestrator
+import com.localandro.gemma4e2b.agent.AgentPhase
 import com.localandro.gemma4e2b.domain.model.Message
 import com.localandro.gemma4e2b.domain.model.MessageRole
 import com.localandro.gemma4e2b.domain.repository.InferenceRepository
+import com.localandro.gemma4e2b.security.ToolConfirmationDialog
+import com.localandro.gemma4e2b.security.ToolConfirmationRequest
 
 /**
  * Full chat screen with real-time token streaming from Gemma 4 E2B.
  *
  * Shows a loading overlay while the LiteRT-LM engine warms up (GPU offload),
  * then presents a conversational UI where the user can type prompts and
- * see the model's response appear token by token.
+ * see the model's response appear token by token. Includes the agentic
+ * tool execution loop and security confirmation dialog.
  *
  * @param modelPath Absolute path to the downloaded model file inside filesDir.
  * @param inferenceRepository The inference engine to use.
+ * @param orchestrator The agentic action orchestrator.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     modelPath: String,
-    inferenceRepository: InferenceRepository
+    inferenceRepository: InferenceRepository,
+    orchestrator: ActionOrchestrator
 ) {
     val chatViewModel: ChatViewModel = viewModel(
-        factory = ChatViewModel.Factory(inferenceRepository, modelPath)
+        factory = ChatViewModel.Factory(inferenceRepository, modelPath, orchestrator)
     )
     val uiState by chatViewModel.uiState.collectAsState()
+    val agentState by chatViewModel.agentState.collectAsState()
+
+    // Confirmation dialog state for security policy.
+    val confirmationRequest = remember { mutableStateOf<ToolConfirmationRequest?>(null) }
+
+    // Show confirmation dialog when a tool needs approval.
+    ToolConfirmationDialog(request = confirmationRequest)
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Gemma 4 E2B") },
+                title = {
+                    Column {
+                        Text("Gemma 4 E2B")
+                        if (agentState.phase != AgentPhase.IDLE) {
+                            Text(
+                                text = when (agentState.phase) {
+                                    AgentPhase.PLANNING -> "🧠 Planificando…"
+                                    AgentPhase.EXECUTING -> "⚡ Ejecutando: ${agentState.activeTool ?: "herramienta"}"
+                                    AgentPhase.OBSERVING -> "👁 Observando resultado…"
+                                    AgentPhase.REFINING -> "✨ Refinando respuesta…"
+                                    AgentPhase.ERROR -> "❌ Error"
+                                    else -> ""
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
