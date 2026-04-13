@@ -50,10 +50,11 @@ class LiteRTLMInferenceRepository(
         this.config = config
 
         // Build engine options targeting GPU backend (Adreno 710).
+        // maxTopK is set to a ceiling value to allow runtime topK flexibility.
         val inferenceOptions = LlmInference.LlmInferenceOptions.builder()
             .setModelPath(modelPath)
             .setMaxTokens(config.maxTokens)
-            .setMaxTopK(config.topK)
+            .setMaxTopK(100)
             .build()
 
         Log.i(TAG, "Creating LlmInference engine from: $modelPath")
@@ -98,18 +99,26 @@ class LiteRTLMInferenceRepository(
 
         session.addQueryChunk(prompt)
 
-        session.generateResponseAsync { partialResult, done ->
-            if (partialResult.isNotEmpty()) {
-                trySend(partialResult)
+        try {
+            session.generateResponseAsync { partialResult, done ->
+                try {
+                    if (partialResult.isNotEmpty()) {
+                        trySend(partialResult)
+                    }
+                    if (done) {
+                        close()
+                    }
+                } catch (e: Exception) {
+                    close(e)
+                }
             }
-            if (done) {
-                close()
-            }
+        } catch (e: Exception) {
+            close(e)
         }
 
         awaitClose {
-            // If the collector is cancelled, the future will complete on its own;
-            // we don't force-cancel to avoid native crashes.
+            // If the collector is cancelled, the native generation will complete
+            // on its own; we don't force-cancel to avoid native crashes.
         }
     }
 }
