@@ -24,12 +24,12 @@ import java.util.concurrent.TimeUnit
 class ModelDownloadManager(private val context: Context) {
 
     companion object {
-        /** Public Hugging Face URL for the Gemma 4 E2B INT4 task file. */
+        /** Public Hugging Face URL for the Gemma 4 E2B LiteRT-LM task file. */
         const val MODEL_URL =
-            "https://huggingface.co/google/gemma-4-e2b-it-gpu-int4/resolve/main/gemma-4-e2b-it-int4.task"
+            "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task?download=true"
 
         /** Local file name stored inside filesDir. */
-        const val MODEL_FILE_NAME = "gemma-4-e2b-it-int4.task"
+        const val MODEL_FILE_NAME = "gemma-4-E2B-it-web.task"
 
         private const val BUFFER_SIZE = 8 * 1024 // 8 KB
     }
