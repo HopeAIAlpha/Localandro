@@ -56,9 +56,10 @@ class MainActivity : ComponentActivity() {
 private fun AppEntryPoint(initialModelPath: String?) {
     var modelPath by remember { mutableStateOf(initialModelPath) }
 
-    if (modelPath != null) {
+    val currentModelPath = modelPath
+    if (currentModelPath != null) {
         // Model exists → start inference UI
-        ChatScreen(modelPath = modelPath!!)
+        ChatScreen(modelPath = currentModelPath)
     } else {
         // Model missing → download it first
         SetupScreen(

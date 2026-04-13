@@ -20,7 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -47,10 +47,11 @@ fun SetupScreen(onDownloadComplete: (String) -> Unit) {
     val context = LocalContext.current
     val downloadManager = remember { ModelDownloadManager(context) }
 
-    var downloadProgress by remember { mutableFloatStateOf(0f) }
+    var downloadProgress by remember { mutableStateOf(0f) }
     var statusText by remember { mutableStateOf("Preparando descarga del modelo…") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isDownloading by remember { mutableStateOf(true) }
+    var retryTrigger by remember { mutableIntStateOf(0) }
 
     val animatedProgress by animateFloatAsState(
         targetValue = downloadProgress,
@@ -67,8 +68,8 @@ fun SetupScreen(onDownloadComplete: (String) -> Unit) {
         }
     }
 
-    // Start the download when the composable enters composition.
-    LaunchedEffect(Unit) {
+    // Start the download when the composable enters composition or on retry.
+    LaunchedEffect(retryTrigger) {
         downloadManager.download().collect { state ->
             when (state) {
                 is DownloadState.Starting -> {
@@ -140,6 +141,7 @@ fun SetupScreen(onDownloadComplete: (String) -> Unit) {
                 errorMessage = null
                 isDownloading = true
                 downloadProgress = 0f
+                retryTrigger++
             }) {
                 Text("Reintentar")
             }
