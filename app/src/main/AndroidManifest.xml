@@ -13,7 +13,8 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Localandro">
 
-        <!-- Required for MediaPipe GPU backend (Adreno 710 / OpenCL) -->
+        <!-- Required for LiteRT-LM GPU backend (Adreno 710 / OpenCL) -->
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
 
         <activity

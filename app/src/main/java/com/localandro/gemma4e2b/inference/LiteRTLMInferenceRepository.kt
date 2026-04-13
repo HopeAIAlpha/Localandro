@@ -2,22 +2,25 @@ package com.localandro.gemma4e2b.inference
 
 import android.content.Context
 import android.util.Log
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
-import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
-import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession.LlmInferenceSessionOptions
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.SamplerConfig
 import com.localandro.gemma4e2b.domain.repository.InferenceConfig
 import com.localandro.gemma4e2b.domain.repository.InferenceRepository
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
 import java.io.File
 
 /**
- * Implementation of [InferenceRepository] backed by the MediaPipe
- * LLM Inference engine (LiteRT-LM compatible).
+ * Implementation of [InferenceRepository] backed by the LiteRT-LM
+ * native inference engine.
  *
- * Uses [LlmInference] for model loading with GPU offload, and
- * [LlmInferenceSession] for stateful, streaming token generation
+ * Uses [Engine] for model loading with GPU offload, and
+ * [Conversation] for stateful, streaming token generation
  * targeting the Gemma 4 E2B `.litertlm` model.
  *
  * @param context Application context required by the native engine.
@@ -31,10 +34,10 @@ class LiteRTLMInferenceRepository(
     }
 
     @Volatile
-    private var llmInference: LlmInference? = null
+    private var engine: Engine? = null
 
     @Volatile
-    private var llmSession: LlmInferenceSession? = null
+    private var conversation: Conversation? = null
 
     private var config: InferenceConfig = InferenceConfig()
 
@@ -49,76 +52,62 @@ class LiteRTLMInferenceRepository(
 
         this.config = config
 
-        // Build engine options targeting GPU backend (Adreno 710).
-        // maxTopK is set to a ceiling value to allow runtime topK flexibility.
-        val inferenceOptions = LlmInference.LlmInferenceOptions.builder()
-            .setModelPath(modelPath)
-            .setMaxTokens(config.maxTokens)
-            .setMaxTopK(100)
-            .build()
+        // Build engine config targeting GPU backend (Adreno 710).
+        val engineConfig = EngineConfig(
+            modelPath = modelPath,
+            backend = Backend.GPU(),
+            cacheDir = context.cacheDir.path
+        )
 
-        Log.i(TAG, "Creating LlmInference engine from: $modelPath")
-        llmInference = LlmInference.createFromOptions(context, inferenceOptions)
+        Log.i(TAG, "Creating LiteRT-LM Engine from: $modelPath")
+        val eng = Engine(engineConfig)
+        eng.initialize()
+        engine = eng
 
-        // Create a session with sampling parameters.
-        val sessionOptions = LlmInferenceSessionOptions.builder()
-            .setTemperature(config.temperature)
-            .setTopK(config.topK)
-            .setTopP(config.topP)
-            .build()
+        // Create a conversation with sampling parameters.
+        val conversationConfig = ConversationConfig(
+            samplerConfig = SamplerConfig(
+                temperature = config.temperature.toDouble(),
+                topK = config.topK,
+                topP = config.topP.toDouble()
+            )
+        )
 
-        Log.i(TAG, "Creating LlmInferenceSession (temp=${config.temperature}, topK=${config.topK})")
-        llmSession = LlmInferenceSession.createFromOptions(llmInference!!, sessionOptions)
+        Log.i(TAG, "Creating Conversation (temp=${config.temperature}, topK=${config.topK})")
+        conversation = eng.createConversation(conversationConfig)
 
         Log.i(TAG, "Engine initialized successfully (GPU offload active)")
     }
 
-    override fun isInitialized(): Boolean = llmInference != null && llmSession != null
+    override fun isInitialized(): Boolean = engine != null && conversation != null
 
     override suspend fun release() {
         Log.i(TAG, "Releasing engine resources")
         try {
-            llmSession?.close()
+            conversation?.close()
         } catch (e: Exception) {
-            Log.w(TAG, "Error closing session: ${e.message}")
+            Log.w(TAG, "Error closing conversation: ${e.message}")
         }
         try {
-            llmInference?.close()
+            engine?.close()
         } catch (e: Exception) {
-            Log.w(TAG, "Error closing inference: ${e.message}")
+            Log.w(TAG, "Error closing engine: ${e.message}")
         }
-        llmSession = null
-        llmInference = null
+        conversation = null
+        engine = null
     }
 
     // ── Inference ────────────────────────────────────────────────────
 
-    override fun streamResponse(prompt: String): Flow<String> = callbackFlow {
-        val session = llmSession
+    override fun streamResponse(prompt: String): Flow<String> {
+        val conv = conversation
             ?: throw IllegalStateException("Engine not initialized – call initialize() first")
 
-        session.addQueryChunk(prompt)
-
-        try {
-            session.generateResponseAsync { partialResult, done ->
-                try {
-                    if (partialResult.isNotEmpty()) {
-                        trySend(partialResult)
-                    }
-                    if (done) {
-                        close()
-                    }
-                } catch (e: Exception) {
-                    close(e)
-                }
+        return conv.sendMessageAsync(prompt)
+            .map { message -> message.toString() }
+            .catch { e ->
+                Log.e(TAG, "Streaming error: ${e.message}", e)
+                throw e
             }
-        } catch (e: Exception) {
-            close(e)
-        }
-
-        awaitClose {
-            // If the collector is cancelled, the native generation will complete
-            // on its own; we don't force-cancel to avoid native crashes.
-        }
     }
 }

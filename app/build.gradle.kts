@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -53,10 +54,6 @@ android {
         buildConfig = true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
-    }
-
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -84,8 +81,8 @@ dependencies {
     // OkHttp for model download
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // MediaPipe LLM Inference (LiteRT-LM compatible engine for .litertlm models)
-    implementation("com.google.mediapipe:tasks-genai:0.10.27")
+    // LiteRT-LM native inference engine for .litertlm models
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.10.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
